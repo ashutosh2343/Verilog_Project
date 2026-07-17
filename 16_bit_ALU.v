@@ -1,59 +1,93 @@
-// 16-Bit Arithmetic Logic Unit (ALU)
+// 16-Bit Pipelined Arithmetic Logic Unit (ALU)
 module alu_16bit (
-    input  [15:0] a, b,       // 16-bit input operands
-    input  [3:0]  alu_sel,     // 4-bit operation select line
-    output reg [15:0] alu_out, // 16-bit output result
-    output reg    carry_out,   // Carry out flag for addition/subtraction
-    output        zero,        // Zero flag (1 if alu_out is 0)
-    output        negative     // Negative flag (MSB of the output)
+    input             clk,         // System Clock
+    input             rst_n,       // Active-low synchronous reset
+    input      [15:0] a_in,        // 16-bit input operand A
+    input      [15:0] b_in,        // 16-bit input operand B
+    input      [3:0]  alu_sel_in,  // 4-bit operation select line
+    output reg [15:0] alu_out,     // 16-bit registered output result
+    output reg        carry_out,   // Registered carry-out flag
+    output reg        zero,        // Registered zero flag
+    output reg        negative     // Registered negative flag (MSB)
 );
 
-    // Internal 17-bit register to reliably calculate carry out
-    reg [16:0] ext_result;
+    // --- STAGE 1: Input Registers (Pipeline Stage 1) ---
+    reg [15:0] r1_a, r1_b;
+    reg [3:0]  r1_sel;
 
-    // Zero flag and Negative flag assignments
-    assign zero = (alu_out == 16'b0);
-    assign negative = alu_out[15];
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            r1_a   <= 16'h0000;
+            r1_b   <= 16'h0000;
+            r1_sel <= 4'b0000;
+        end else begin
+            r1_a   <= a_in;
+            r1_b   <= b_in;
+            r1_sel <= alu_sel_in;
+        end
+    end
+
+    // --- STAGE 2: Combinational Execution Logic ---
+    reg [16:0] ext_result;
+    reg [15:0] exec_out;
+    reg        exec_carry;
 
     always @(*) begin
-        // Default resets to avoid latches
-        carry_out = 1'b0;
-        ext_result = 17'b0;
-        
-        case(alu_sel)
+        // Safe defaults to prevent latching
+        ext_result = 17'h00000;
+        exec_out   = 16'h0000;
+        exec_carry = 1'b0;
+
+        case (r1_sel)
             // --- Arithmetic Operations ---
             4'b0000: begin // Addition
-                ext_result = {1'b0, a} + {1'b0, b};
-                alu_out   = ext_result[15:0];
-                carry_out = ext_result[16];
+                ext_result = {1'b0, r1_a} + {1'b0, r1_b};
+                exec_out   = ext_result[15:0];
+                exec_carry = ext_result[16];
             end
-            4'b0001: begin // Subtraction
-                ext_result = {1'b0, a} - {1'b0, b};
-                alu_out   = ext_result[15:0];
-                carry_out = ext_result[16]; // Borrows act as carry
+            4'b0001: begin // Subtraction (Borrow represented via carry)
+                ext_result = {1'b0, r1_a} - {1'b0, r1_b};
+                exec_out   = ext_result[15:0];
+                exec_carry = ext_result[16]; 
             end
-            4'b0010: alu_out = a * b;        // Multiplication (lower 16 bits)
-            4'b0011: alu_out = (b != 0) ? (a / b) : 16'b0; // Division with 0 check
-            4'b0100: alu_out = a + 1'b1;     // Increment A
-            4'b0101: alu_out = a - 1'b1;     // Decrement A
-            
+            4'b0010: exec_out = r1_a * r1_b; // Multiplication (Lower 16 bits)
+            4'b0011: exec_out = (r1_b != 16'h0000) ? (r1_a / r1_b) : 16'h0000; // Safe Div
+            4'b0100: exec_out = r1_a + 1'b1; // Increment A
+            4'b0101: exec_out = r1_a - 1'b1; // Decrement A
+
             // --- Logical Operations ---
-            4'b0110: alu_out = a & b;        // Bitwise AND
-            4'b0111: alu_out = a | b;        // Bitwise OR
-            4'b1000: alu_out = a ^ b;        // Bitwise XOR
-            4'b1001: alu_out = ~(a & b);     // Bitwise NAND
-            4'b1010: alu_out = ~(a | b);     // Bitwise NOR
-            4'b1011: alu_out = ~(a ^ b);     // Bitwise XNOR
-            4'b1100: alu_out = ~a;           // Bitwise NOT A
-            
+            4'b0110: exec_out = r1_a & r1_b;   // AND
+            4'b0111: exec_out = r1_a | r1_b;   // OR
+            4'b1000: exec_out = r1_a ^ r1_b;   // XOR
+            4'b1001: exec_out = ~(r1_a & r1_b);// NAND
+            4'b1010: exec_out = ~(r1_a | r1_b);// NOR
+            4'b1011: exec_out = ~(r1_a ^ r1_b);// XNOR
+            4'b1100: exec_out = ~r1_a;         // NOT A
+
             // --- Shift Operations ---
-            4'b1101: alu_out = a << 1;       // Logical Shift Left by 1
-            4'b1110: alu_out = a >> 1;       // Logical Shift Right by 1
-            
-            // --- Comparison Operation ---
-            4'b1111: alu_out = (a < b) ? 16'd1 : 16'd0; // Less Than comparison
-            
-            default: alu_out = 16'b0;
+            4'b1101: exec_out = r1_a << 1;     // SLL
+            4'b1110: exec_out = r1_a >> 1;     // SRL
+
+            // --- Comparison ---
+            4'b1111: exec_out = (r1_a < r1_b) ? 16'h0001 : 16'h0000;
+
+            default: exec_out = 16'h0000;
         endcase
     end
+
+    // --- STAGE 3: Output Registers (Pipeline Stage 2 Writeback) ---
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            alu_out   <= 16'h0000;
+            carry_out <= 1'b0;
+            zero      <= 1'b0;
+            negative  <= 1'b0;
+        end else begin
+            alu_out   <= exec_out;
+            carry_out <= exec_carry;
+            zero      <= (exec_out == 16'h0000);
+            negative  <= exec_out[15]; // Two's complement sign-bit tracking
+        end
+    end
+
 endmodule
